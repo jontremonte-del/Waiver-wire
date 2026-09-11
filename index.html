@@ -116,7 +116,7 @@ async function callClaude(apiKey, { system, prompt }) {
     },
     body: JSON.stringify({
       model: "claude-sonnet-5",
-      max_tokens: 1500,
+      max_tokens: 4096,
       system,
       messages: [{ role: "user", content: prompt }],
       tools: [{ type: "web_search_20250305", name: "web_search" }],
@@ -131,7 +131,11 @@ async function callClaude(apiKey, { system, prompt }) {
   const cleaned = text.replace(/```json|```/g, "").trim();
   const start = cleaned.indexOf("{");
   const end = cleaned.lastIndexOf("}");
-  if (start === -1 || end === -1) throw new Error("No JSON found in Claude's response");
+  if (start === -1 || end === -1) {
+    const reason = data.stop_reason ? ` (stop reason: ${data.stop_reason})` : "";
+    const snippet = cleaned ? ` Response so far: "${cleaned.slice(0, 200)}"` : " No text was returned.";
+    throw new Error(`Claude didn't finish a JSON response${reason}.${snippet}`);
+  }
   return JSON.parse(cleaned.slice(start, end + 1));
 }
 
