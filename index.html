@@ -1,0 +1,602 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Waiver Wire</title>
+<style>
+  :root {
+    --bg:#12151A; --surface:#1B2028; --surface2:#222835; --border:#2A303A;
+    --text:#EDEFF2; --muted:#8B93A1; --accent:#4C9A5B; --amber:#E0A83E; --danger:#C1594A;
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: 'Inter', -apple-system, sans-serif; color: var(--text); background: var(--bg); }
+  .app { max-width: 720px; margin: 0 auto; padding: 24px 20px 60px; }
+  h1, h3, h4 { font-family: 'Barlow Condensed', 'Inter', sans-serif; font-weight: 700; margin: 0; }
+  h1 { font-size: 28px; }
+  h3 { font-size: 19px; }
+  h4 { font-size: 15px; color: var(--muted); margin-bottom: 8px; }
+  .topbar { display:flex; justify-content:space-between; align-items:center; margin-bottom: 6px; }
+  .subtitle { color: var(--muted); font-size: 13px; margin: 4px 0 20px; }
+  button { font-family: 'Inter', sans-serif; border-radius: 6px; border: 1px solid var(--border);
+    background: var(--surface2); color: var(--text); padding: 8px 14px; font-size: 13px; cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #0E1712; font-weight: 600; }
+  button.ghost { background: transparent; }
+  button:disabled { opacity: 0.5; cursor: default; }
+  .league-card, .setup-card, .settings-card { background: var(--surface); border: 1px solid var(--border);
+    border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+  .league-header { display:flex; justify-content:space-between; align-items:flex-start; }
+  .league-actions { display:flex; gap: 8px; }
+  .week-tag { display:inline-block; margin-top:4px; font-size: 12px; color: var(--muted);
+    border: 1px solid var(--border); padding: 2px 8px; border-radius: 4px; }
+  .error { color: var(--danger); font-size: 13px; margin-top: 10px; }
+  .results { margin-top: 16px; }
+  .results section { margin-bottom: 18px; }
+  .target-grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 10px; }
+  .target-card { background: var(--surface2); border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; }
+  .target-head { display:flex; align-items:center; gap: 8px; margin-bottom: 4px; }
+  .pos-badge { font-size: 11px; font-weight: 700; color: var(--accent); border: 1px solid var(--accent);
+    border-radius: 4px; padding: 1px 6px; }
+  .target-name { font-weight: 600; font-size: 14px; }
+  .target-reason { font-size: 12.5px; color: var(--muted); margin: 0; line-height: 1.4; }
+  table.lineup-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  .lineup-table th { text-align: left; color: var(--muted); font-weight: 500; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+  .lineup-table td { padding: 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  .start-cell { color: var(--accent); font-weight: 600; }
+  .sit-cell { color: var(--danger); }
+  .setup-card label, .settings-card label { display:block; font-size: 13px; color: var(--muted); margin-bottom: 12px; }
+  .setup-card input, .settings-card input { display:block; width:100%; margin-top: 5px; background: var(--surface2);
+    border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; color: var(--text); font-size: 13px; }
+  .setup-actions { display:flex; gap: 8px; margin-top: 4px; }
+  .league-pick-list { display:flex; flex-direction:column; gap: 6px; margin-bottom: 14px; }
+  .league-pick-item { display:flex; justify-content:space-between; align-items:center; text-align:left;
+    width:100%; background: var(--surface2); border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; }
+  .league-pick-item:hover:not(:disabled) { border-color: var(--accent); }
+  .added-tag { font-size: 11px; color: var(--muted); }
+  .empty { color: var(--muted); font-size: 13px; padding: 20px 0; }
+  .key-status { font-size: 12px; color: var(--muted); }
+  .key-status.set { color: var(--accent); }
+</style>
+</head>
+<body>
+<div class="app" id="app"></div>
+
+<script>
+const SLEEPER = "https://api.sleeper.app/v1";
+
+// ---------- storage helpers (localStorage, this app has no backend) ----------
+function lsGet(key, fallback) {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : fallback;
+  } catch (e) { return fallback; }
+}
+function lsSet(key, value) {
+  try { localStorage.setItem(key, JSON.stringify(value)); } catch (e) {}
+}
+
+// ---------- sleeper API ----------
+async function sleeperGet(path) {
+  const res = await fetch(`${SLEEPER}${path}`);
+  if (!res.ok) throw new Error(`HTTP ${res.status} on ${path}`);
+  return res.json();
+}
+
+async function getPlayersDict() {
+  const cached = lsGet("players_dict_v1", null);
+  if (cached && Date.now() - cached.fetchedAt < 1000 * 60 * 60 * 24 * 3) {
+    return cached.players;
+  }
+  const players = await sleeperGet("/players/nfl");
+  const slim = {};
+  for (const id in players) {
+    const p = players[id];
+    if (!p) continue;
+    slim[id] = {
+      name: p.full_name || `${p.first_name || ""} ${p.last_name || ""}`.trim(),
+      pos: p.position,
+      team: p.team,
+      status: p.injury_status || null,
+    };
+  }
+  try { lsSet("players_dict_v1", { fetchedAt: Date.now(), players: slim }); } catch (e) {}
+  return slim;
+}
+
+// ---------- claude API (bring-your-own key) ----------
+async function callClaude(apiKey, { system, prompt }) {
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
+      "anthropic-dangerous-direct-browser-access": "true",
+    },
+    body: JSON.stringify({
+      model: "claude-sonnet-5",
+      max_tokens: 1500,
+      system,
+      messages: [{ role: "user", content: prompt }],
+      tools: [{ type: "web_search_20250305", name: "web_search" }],
+    }),
+  });
+  const data = await res.json();
+  if (data.error) throw new Error(data.error.message || "Claude API error");
+  const text = (data.content || [])
+    .filter((b) => b.type === "text")
+    .map((b) => b.text)
+    .join("\n");
+  const cleaned = text.replace(/```json|```/g, "").trim();
+  const start = cleaned.indexOf("{");
+  const end = cleaned.lastIndexOf("}");
+  if (start === -1 || end === -1) throw new Error("No JSON found in Claude's response");
+  return JSON.parse(cleaned.slice(start, end + 1));
+}
+
+// ---------- app state ----------
+const state = {
+  apiKey: lsGet("anthropic_api_key", ""),
+  leagues: lsGet("leagues_v1", []),
+  season: null,
+  week: null,
+  playersDict: null,
+  initError: "",
+  showAdd: false,
+  showSettings: false,
+  addStep: "username",
+  addUsername: "",
+  addError: "",
+  addLoading: false,
+  addCandidates: [],
+  addUserId: null,
+  leagueRuns: {}, // leagueId -> { status, error, result }
+};
+
+function render() {
+  const el = document.getElementById("app");
+  el.innerHTML = "";
+  el.appendChild(renderTopbar());
+  if (state.initError) {
+    const p = document.createElement("p");
+    p.className = "error";
+    p.textContent = state.initError;
+    el.appendChild(p);
+  }
+  if (state.showSettings) el.appendChild(renderSettings());
+  if (state.showAdd) el.appendChild(renderAddLeague());
+  if (state.leagues.length === 0 && !state.showAdd) {
+    const p = document.createElement("p");
+    p.className = "empty";
+    p.textContent = "No leagues added yet. Add your Sleeper league to get started.";
+    el.appendChild(p);
+  }
+  state.leagues.forEach((league) => el.appendChild(renderLeagueCard(league)));
+}
+
+function renderTopbar() {
+  const bar = document.createElement("div");
+  const left = document.createElement("div");
+  const h1 = document.createElement("h1");
+  h1.textContent = "Waiver wire";
+  const sub = document.createElement("p");
+  sub.className = "subtitle";
+  sub.textContent = "Sleeper research pipeline, one league at a time";
+  left.appendChild(h1);
+  left.appendChild(sub);
+
+  const right = document.createElement("div");
+  right.style.display = "flex";
+  right.style.gap = "8px";
+  right.style.alignItems = "flex-start";
+
+  const settingsBtn = document.createElement("button");
+  settingsBtn.textContent = state.apiKey ? "API key set" : "Set API key";
+  settingsBtn.onclick = () => { state.showSettings = !state.showSettings; render(); };
+
+  const addBtn = document.createElement("button");
+  addBtn.className = "primary";
+  addBtn.textContent = "+ Add league";
+  addBtn.onclick = () => {
+    state.showAdd = true;
+    state.addStep = "username";
+    state.addError = "";
+    render();
+  };
+
+  right.appendChild(settingsBtn);
+  if (!state.showAdd) right.appendChild(addBtn);
+
+  const wrap = document.createElement("div");
+  wrap.className = "topbar";
+  wrap.appendChild(left);
+  wrap.appendChild(right);
+  return wrap;
+}
+
+function renderSettings() {
+  const card = document.createElement("div");
+  card.className = "settings-card";
+  const h3 = document.createElement("h3");
+  h3.textContent = "Anthropic API key";
+  card.appendChild(h3);
+
+  const label = document.createElement("label");
+  label.textContent = "Used only in your browser to call Claude directly.";
+  const input = document.createElement("input");
+  input.type = "password";
+  input.placeholder = "sk-ant-...";
+  input.value = state.apiKey;
+  label.appendChild(input);
+  card.appendChild(label);
+
+  const actions = document.createElement("div");
+  actions.className = "setup-actions";
+  const save = document.createElement("button");
+  save.className = "primary";
+  save.textContent = "Save key";
+  save.onclick = () => {
+    state.apiKey = input.value.trim();
+    lsSet("anthropic_api_key", state.apiKey);
+    state.showSettings = false;
+    render();
+  };
+  const close = document.createElement("button");
+  close.textContent = "Close";
+  close.onclick = () => { state.showSettings = false; render(); };
+  actions.appendChild(save);
+  actions.appendChild(close);
+  card.appendChild(actions);
+  return card;
+}
+
+function renderAddLeague() {
+  const card = document.createElement("div");
+  card.className = "setup-card";
+
+  if (state.addStep === "pick") {
+    const h3 = document.createElement("h3");
+    h3.textContent = "Pick a league";
+    card.appendChild(h3);
+    const sub = document.createElement("p");
+    sub.className = "subtitle";
+    sub.style.margin = "0 0 12px";
+    sub.textContent = `Signed in as ${state.addUsername}`;
+    card.appendChild(sub);
+
+    const list = document.createElement("div");
+    list.className = "league-pick-list";
+    state.addCandidates.forEach((l) => {
+      const already = state.leagues.some((x) => x.id === l.league_id);
+      const item = document.createElement("button");
+      item.className = "league-pick-item";
+      item.disabled = already;
+      const name = document.createElement("span");
+      name.textContent = l.name;
+      item.appendChild(name);
+      if (already) {
+        const tag = document.createElement("span");
+        tag.className = "added-tag";
+        tag.textContent = "already added";
+        item.appendChild(tag);
+      }
+      item.onclick = () => {
+        state.leagues = [...state.leagues.filter((x) => x.id !== l.league_id),
+          { id: l.league_id, name: l.name || "Sleeper league", userId: state.addUserId }];
+        lsSet("leagues_v1", state.leagues);
+        state.showAdd = false;
+        render();
+      };
+      list.appendChild(item);
+    });
+    card.appendChild(list);
+
+    const actions = document.createElement("div");
+    actions.className = "setup-actions";
+    const back = document.createElement("button");
+    back.textContent = "Back";
+    back.onclick = () => { state.addStep = "username"; render(); };
+    actions.appendChild(back);
+    if (state.leagues.length > 0) {
+      const cancel = document.createElement("button");
+      cancel.textContent = "Cancel";
+      cancel.onclick = () => { state.showAdd = false; render(); };
+      actions.appendChild(cancel);
+    }
+    card.appendChild(actions);
+    return card;
+  }
+
+  const h3 = document.createElement("h3");
+  h3.textContent = "Add a Sleeper league";
+  card.appendChild(h3);
+
+  const label = document.createElement("label");
+  label.textContent = "Your Sleeper username";
+  const input = document.createElement("input");
+  input.value = state.addUsername;
+  input.placeholder = "display name you log in with";
+  input.oninput = (e) => { state.addUsername = e.target.value; };
+  input.onkeydown = (e) => { if (e.key === "Enter") findLeagues(); };
+  label.appendChild(input);
+  card.appendChild(label);
+
+  if (state.addError) {
+    const err = document.createElement("p");
+    err.className = "error";
+    err.textContent = state.addError;
+    card.appendChild(err);
+  }
+
+  const actions = document.createElement("div");
+  actions.className = "setup-actions";
+  const find = document.createElement("button");
+  find.className = "primary";
+  find.textContent = state.addLoading ? "Looking up…" : "Find my leagues";
+  find.disabled = state.addLoading;
+  find.onclick = findLeagues;
+  actions.appendChild(find);
+  if (state.leagues.length > 0) {
+    const cancel = document.createElement("button");
+    cancel.textContent = "Cancel";
+    cancel.onclick = () => { state.showAdd = false; render(); };
+    actions.appendChild(cancel);
+  }
+  card.appendChild(actions);
+  return card;
+}
+
+async function findLeagues() {
+  if (!state.addUsername.trim()) {
+    state.addError = "Enter your Sleeper username first.";
+    render();
+    return;
+  }
+  state.addError = "";
+  state.addLoading = true;
+  render();
+  try {
+    let currentSeason = state.season;
+    if (!currentSeason) {
+      const s = await sleeperGet("/state/nfl");
+      currentSeason = s.season;
+      state.season = currentSeason;
+    }
+    let user;
+    try {
+      user = await sleeperGet(`/user/${state.addUsername.trim()}`);
+    } catch (e) {
+      state.addError = `Couldn't reach Sleeper to look up that username. (${e.message})`;
+      state.addLoading = false; render(); return;
+    }
+    if (!user || !user.user_id) {
+      state.addError = "Sleeper didn't return a user for that username. Check spelling.";
+      state.addLoading = false; render(); return;
+    }
+    let leagues;
+    try {
+      leagues = await sleeperGet(`/user/${user.user_id}/leagues/nfl/${currentSeason}`);
+    } catch (e) {
+      state.addError = `Couldn't load leagues for that user. (${e.message})`;
+      state.addLoading = false; render(); return;
+    }
+    if (!leagues.length) {
+      state.addError = `No ${currentSeason} NFL leagues found for that username.`;
+      state.addLoading = false; render(); return;
+    }
+    state.addUserId = user.user_id;
+    state.addCandidates = leagues;
+    state.addStep = "pick";
+  } catch (e) {
+    state.addError = `Unexpected error: ${e.message}`;
+  }
+  state.addLoading = false;
+  render();
+}
+
+function nameList(ids, playersDict) {
+  return (ids || [])
+    .map((id) => playersDict[id])
+    .filter(Boolean)
+    .map((p) => `${p.name} (${p.pos}${p.team ? ", " + p.team : ""}${p.status ? ", " + p.status : ""})`)
+    .join("; ");
+}
+
+function renderLeagueCard(league) {
+  const run = state.leagueRuns[league.id] || { status: "idle" };
+  const card = document.createElement("div");
+  card.className = "league-card";
+
+  const header = document.createElement("div");
+  header.className = "league-header";
+  const left = document.createElement("div");
+  const h3 = document.createElement("h3");
+  h3.textContent = league.name;
+  const weekTag = document.createElement("span");
+  weekTag.className = "week-tag";
+  weekTag.textContent = `Week ${state.week ?? "—"}`;
+  left.appendChild(h3);
+  left.appendChild(weekTag);
+
+  const actions = document.createElement("div");
+  actions.className = "league-actions";
+  const runBtn = document.createElement("button");
+  runBtn.className = "primary";
+  runBtn.textContent = run.status === "loading" ? "Researching…" : "Run weekly research";
+  runBtn.disabled = run.status === "loading" || !state.week || !state.apiKey;
+  runBtn.title = !state.apiKey ? "Set your Anthropic API key first" : "";
+  runBtn.onclick = () => runLeague(league);
+  const removeBtn = document.createElement("button");
+  removeBtn.className = "ghost";
+  removeBtn.textContent = "Remove";
+  removeBtn.onclick = () => {
+    state.leagues = state.leagues.filter((l) => l.id !== league.id);
+    lsSet("leagues_v1", state.leagues);
+    render();
+  };
+  actions.appendChild(runBtn);
+  actions.appendChild(removeBtn);
+
+  header.appendChild(left);
+  header.appendChild(actions);
+  card.appendChild(header);
+
+  if (!state.apiKey) {
+    const p = document.createElement("p");
+    p.className = "error";
+    p.textContent = "Set your Anthropic API key above before running research.";
+    card.appendChild(p);
+  }
+
+  if (run.status === "error") {
+    const p = document.createElement("p");
+    p.className = "error";
+    p.textContent = run.error;
+    card.appendChild(p);
+  }
+
+  if (run.status === "done" && run.result) {
+    card.appendChild(renderResults(run.result));
+  }
+
+  return card;
+}
+
+function renderResults(result) {
+  const wrap = document.createElement("div");
+  wrap.className = "results";
+
+  const targetsSection = document.createElement("section");
+  const h4a = document.createElement("h4");
+  h4a.textContent = "Waiver targets";
+  targetsSection.appendChild(h4a);
+  const grid = document.createElement("div");
+  grid.className = "target-grid";
+  (result.waiverTargets || []).forEach((t) => {
+    const c = document.createElement("div");
+    c.className = "target-card";
+    const head = document.createElement("div");
+    head.className = "target-head";
+    const badge = document.createElement("span");
+    badge.className = "pos-badge";
+    badge.textContent = t.position;
+    const name = document.createElement("span");
+    name.className = "target-name";
+    name.textContent = t.name;
+    head.appendChild(badge);
+    head.appendChild(name);
+    const reason = document.createElement("p");
+    reason.className = "target-reason";
+    reason.textContent = t.reason;
+    c.appendChild(head);
+    c.appendChild(reason);
+    grid.appendChild(c);
+  });
+  targetsSection.appendChild(grid);
+  wrap.appendChild(targetsSection);
+
+  if (result.lineupCalls && result.lineupCalls.length > 0) {
+    const lineupSection = document.createElement("section");
+    const h4b = document.createElement("h4");
+    h4b.textContent = "Lineup calls";
+    lineupSection.appendChild(h4b);
+    const table = document.createElement("table");
+    table.className = "lineup-table";
+    table.innerHTML = "<thead><tr><th>Slot</th><th>Start</th><th>Sit</th><th>Why</th></tr></thead>";
+    const tbody = document.createElement("tbody");
+    result.lineupCalls.forEach((c) => {
+      const tr = document.createElement("tr");
+      const tdSlot = document.createElement("td"); tdSlot.textContent = c.position;
+      const tdStart = document.createElement("td"); tdStart.className = "start-cell"; tdStart.textContent = c.start;
+      const tdSit = document.createElement("td"); tdSit.className = "sit-cell"; tdSit.textContent = c.sit || "—";
+      const tdWhy = document.createElement("td"); tdWhy.textContent = c.reason;
+      tr.appendChild(tdSlot); tr.appendChild(tdStart); tr.appendChild(tdSit); tr.appendChild(tdWhy);
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    lineupSection.appendChild(table);
+    wrap.appendChild(lineupSection);
+  }
+
+  return wrap;
+}
+
+async function runLeague(league) {
+  state.leagueRuns[league.id] = { status: "loading" };
+  render();
+  try {
+    const playersDict = state.playersDict;
+    const [rosters, matchups] = await Promise.all([
+      sleeperGet(`/league/${league.id}/rosters`),
+      sleeperGet(`/league/${league.id}/matchups/${state.week}`),
+    ]);
+    const myRoster = rosters.find((r) => r.owner_id === league.userId);
+    if (!myRoster) throw new Error("Couldn't find your roster in this league.");
+
+    const myMatchup = matchups.find((m) => m.roster_id === myRoster.roster_id);
+    const oppMatchup = myMatchup
+      ? matchups.find((m) => m.matchup_id === myMatchup.matchup_id && m.roster_id !== myRoster.roster_id)
+      : null;
+    const oppRoster = oppMatchup ? rosters.find((r) => r.roster_id === oppMatchup.roster_id) : null;
+
+    const ownedIds = new Set(rosters.flatMap((r) => r.players || []));
+    const trending = await sleeperGet("/players/nfl/trending/add?lookback_hours=48&limit=40");
+    const available = trending
+      .map((t) => t.player_id)
+      .filter((id) => !ownedIds.has(id))
+      .map((id) => playersDict[id])
+      .filter((p) => p && p.name)
+      .slice(0, 20);
+
+    const myStarters = nameList(myRoster.starters, playersDict);
+    const myBench = nameList((myRoster.players || []).filter((id) => !(myRoster.starters || []).includes(id)), playersDict);
+    const oppStarters = oppRoster ? nameList(oppRoster.starters, playersDict) : "unknown opponent";
+    const availableList = available.map((p) => `${p.name} (${p.pos}${p.team ? ", " + p.team : ""})`).join("; ");
+
+    const prompt = `You are helping with a fantasy football league called "${league.name}", week ${state.week}.
+
+My current starters: ${myStarters}
+My bench: ${myBench}
+My opponent's starters this week: ${oppStarters}
+Trending, currently-available waiver players: ${availableList}
+
+Research current injury news, target share trends, and this week's matchups using web search. Then respond with ONLY a JSON object, no prose, no markdown fences, in this exact shape:
+{"waiverTargets":[{"name":"","position":"","reason":""}],"lineupCalls":[{"position":"","start":"","sit":"","reason":""}]}
+
+Rules:
+- waiverTargets: up to 5 players from the available list worth adding, ranked best first. Reasons can include specifics from your research (injury status, snap counts, matchup).
+- lineupCalls: only include RB/WR/TE/FLEX slots where there's a real start/sit decision between two of my own rostered players (skip locked spots like QB/K/DEF unless genuinely in question). Ground reasons in this week's matchup.`;
+
+    const parsed = await callClaude(state.apiKey, {
+      system: "You are a concise fantasy football analyst. Always answer with valid JSON only, matching the schema given, and nothing else.",
+      prompt,
+    });
+    state.leagueRuns[league.id] = { status: "done", result: parsed };
+  } catch (e) {
+    state.leagueRuns[league.id] = { status: "error", error: e.message || "Something went wrong running this league's research." };
+  }
+  render();
+}
+
+async function init() {
+  render();
+  try {
+    const s = await sleeperGet("/state/nfl");
+    state.week = s.week;
+    state.season = s.season;
+  } catch (e) {
+    state.initError = "Couldn't reach Sleeper to get the current week.";
+  }
+  try {
+    state.playersDict = await getPlayersDict();
+  } catch (e) {
+    state.initError = "Couldn't load the player list from Sleeper.";
+  }
+  render();
+}
+
+init();
+</script>
+</body>
+</html>
